@@ -1,0 +1,327 @@
+---
+title: "Predicting GDP growth for selected countries"
+output:
+  html_document: default
+  pdf_document: default
+date: '2024-01-14'
+---
+
+## Data Structure
+
+A dataset containing 1311 entries on 6 variables, for 57 countries over 23 years. The variables are as follows:
+
+-   **Year**: The year of observation
+-   **GDP Growth**: Annual GDP growth rate
+-   **GFCF change**: Gross Fixed Capital Formation change
+-   **Inflation change**: Percentage change in inflation
+-   **Unemployment change**: Percentage change in unemployment (some entries may have null values)
+
+## Objective
+
+Predict the GDP growth rate with the other variables as predictors.
+
+------------------------------------------------------------------------
+
+**Loading the data and necessary libraries**
+
+```{r}
+# Load necessary libraries
+library(tidyverse)
+library(viridis)
+library(car)
+library(lubridate)
+library(broom)
+library(ggplot2)
+library(stats)
+library(stargazer)
+library(dplyr)
+library(lmtest)
+library(sandwich)
+library(forecast)
+library(stats)
+library(reshape2)
+library(gridExtra)
+library(plm)
+library(broom)
+library(gt)
+
+# Read the data
+data <- read.csv('economic_indicators.csv')
+```
+
+## Contents
+
+**1. Data Exploration**
+
+**2. Pooled OLS estimation**
+
+**3. Fixed effects estimation**
+
+**4. Random effects estimation**
+
+------------------------------------------------------------------------
+
+### 1. Data Exploration
+
+-   Data Stats
+-   Checking variable correlations
+-   Checking the Variance Inflation Factor (VIF)
+-   Looking at the data
+
+```{r}
+head(data)
+```
+
+```{r}
+num_unique_years <- length(unique(data$Year))
+print(paste("Number of unique years: ", num_unique_years))
+
+num_unique_countries <- length(unique(data$Country.Name))
+print(paste("Number of unique countries: ", num_unique_countries))
+
+num_data_points <- length(data$Country.Name)
+print(paste("Total number of data: ", num_data_points))
+```
+
+```{r}
+# Ensure only numeric columns are included for correlation matrix
+numeric_data_explore <- data %>% select_if(is.numeric) %>%
+  select(-Year)
+
+# Compute the correlation matrix
+correlation_matrix <- cor(numeric_data_explore)
+
+# Convert the correlation matrix to a long format
+long_corr <- melt(correlation_matrix)
+
+# Create a heatmap
+ggplot(long_corr, aes(Var1, Var2, fill = value)) +
+  geom_tile() +
+  geom_text(aes(label = sprintf("%.2f", value)),
+            size = 3, color = "white", vjust = 1) + 
+  scale_fill_viridis(option='viridis') +
+  theme_minimal() +
+  coord_fixed() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(title = "Correlation Heatmap", x = NULL, y = NULL)
+
+```
+
+```{r}
+model_vif <- lm(GDP.Growth ~ Inflation.change + Unemployment.change + GFCF.change, data = data)
+vif_vals <- vif(model_vif)
+barplot(vif_vals, main="VIF Values", horiz= TRUE, col = 'steelblue')
+```
+
+**Scatter plots**
+
+```{r}
+# Extract the correlations with 'GDP.Growth'
+gdp_corrs <- correlation_matrix["GDP.Growth",]
+
+# Create scatterplots
+plot1 <- ggplot(numeric_data_explore, aes(x = `GDP.Growth`, y = `GFCF.change`)) +
+  geom_point() +
+  labs(title = paste('Correlation:', round(gdp_corrs["GFCF.change"], 2)))
+
+plot2 <- ggplot(numeric_data_explore, aes(x = `GDP.Growth`, y = `Inflation.change`)) +
+  geom_point() +
+  labs(title = paste("Correlation:", round(gdp_corrs["Inflation.change"], 2)))
+
+plot3 <- ggplot(numeric_data_explore, aes(x = `GDP.Growth`, y = `Unemployment.change`)) +
+  geom_point() +
+  labs(title = paste("Correlation:", round(gdp_corrs["Unemployment.change"], 2)))
+
+# Arrange the plots in a grid
+grid.arrange(plot1, plot2, plot3, nrow = 1)
+
+```
+
+Capping the inflation change at a maximum of 5%, by removing countries with such inflations.
+
+```{r}
+# Cap the inflation at -5, 5 and exclude countries with Inflation change greater than 5
+data_capped <- ungroup(data %>%
+ group_by(Country.Name) %>%
+ filter(all(abs(Inflation.change) <= 5)))
+
+data_capped_n <- select(data_capped, GDP.Growth, GFCF.change, Inflation.change, Unemployment.change)
+
+
+# Compute the correlation matrix for the capped data
+corrs <- cor(data_capped_n)
+
+# Create scatterplots
+plot1 <- ggplot(data_capped_n, aes(x = `GDP.Growth`, y = `GFCF.change`)) +
+  geom_point() +
+  labs(title = paste("Correlation:", round(corrs["GDP.Growth", "GFCF.change"], 2)))
+
+plot2 <- ggplot(data_capped_n, aes(x = `GDP.Growth`, y = `Inflation.change`)) +
+  geom_point() +
+  labs(title = paste("Correlation:", round(corrs["GDP.Growth", "Inflation.change"], 2)))
+
+plot3 <- ggplot(data_capped_n, aes(x = `GDP.Growth`, y = `Unemployment.change`)) +
+  geom_point() +
+  labs(title = paste("Correlation:", round(corrs["GDP.Growth", "Unemployment.change"], 2)))
+
+# Arrange the plots in a grid
+grid.arrange(plot1, plot2, plot3, nrow = 1)
+
+```
+
+Lets now check the stats about our data
+
+```{r}
+data <- data_capped
+
+num_unique_years <- length(unique(data$Year))
+print(paste("Number of unique years: ", num_unique_years))
+
+num_unique_countries <- length(unique(data$Country.Name))
+print(paste("Number of unique countries: ", num_unique_countries))
+
+num_data_points <- length(data$Country.Name)
+print(paste("Total number of data: ", num_data_points))
+```
+
+### 2. Pooled OLS
+
+------------------------------------------------------------------------
+
+#### Fitting the model
+
+```{r}
+
+X <- data %>% 
+  select(`GFCF.change`, `Unemployment.change`, `Inflation.change`)
+
+
+y <- data$`GDP.Growth`
+
+
+# Fit OLS model
+pooled_ols <- lm(y ~ ., data = X)
+
+# Print summary table
+summary(pooled_ols)
+```
+
+#### Are residuals normally distributed?
+
+-   Looking at the Jarque-Bera and omnibus tests, we have non normality in the residuals
+-   This doesn't mean that the estimator isn't the BLUE (!)
+
+```{r}
+
+# Create Q-Q plot of the residuals with the reference line
+qq_plot <- ggplot() + 
+  stat_qq(aes(sample = residuals(pooled_ols))) + 
+  stat_qq_line(aes(sample = residuals(pooled_ols)), color = "red") +
+  ggtitle("Normal Q-Q") +
+  theme_minimal()
+
+# Create Kernel Density Plot of the residuals
+kde_plot <- ggplot(data = data.frame(resid = residuals(pooled_ols)), aes(x = resid)) +
+  geom_density() +
+  stat_function(fun = dnorm, args = list(mean = mean(residuals(pooled_ols)), 
+                                         sd = sd(residuals(pooled_ols))), 
+                colour = "red", linetype = "dashed") +
+  ggtitle("Residuals KDE") +
+  labs(x = "Residuals", y = "Density") +
+  theme_minimal()
+
+# Arrange the plots in a grid
+grid.arrange(qq_plot, kde_plot, nrow = 1)
+```
+
+#### Are the residuals homoskedastic?
+
+```{r}
+# Plot residuals vs fitted values
+ggplot() +
+  geom_point(aes(x = fitted(pooled_ols), y = residuals(pooled_ols)), color = 'blue') +
+  labs(x = 'Fitted Values', y = 'Residuals', title = 'Residuals vs Fitted Values') +
+  theme_minimal()
+```
+
+From the plot we couldn't be sure. Lets use the breusch pagan and white test to check
+
+```{r}
+# Run White's test for heteroskedasticity
+white_test <- bptest(pooled_ols, ~ fitted(pooled_ols) + I(fitted(pooled_ols)^2), data = data)
+
+# Run Breusch-Pagan test for heteroskedasticity
+bp_test <- bptest(pooled_ols)
+
+# Output the p-values
+cat('White Heteroskedasticity Test p-value:', white_test$p.value, '\n')
+cat('Breusch Pagan Heteroskedasticity Test p-value:', bp_test$p.value, '\n')
+
+```
+
+Clearly there is heteroskedasticity -\> Gauss-Markov assumptions are violated -\> OLS isnt the BLUE
+
+#### Are the residuals correlated with the endogenous variable? Lets visually inspect (exogeneity)
+
+```{r warning=False, message=False}
+# Scatterplot of residuals vs GDP Growth
+correlation <- cor(data$`GDP.Growth`, residuals(pooled_ols))
+ggplot(data = data, aes(x = `GDP.Growth`, y = residuals(pooled_ols))) +
+ geom_point() +
+ geom_smooth(method = "lm", se = FALSE, color = "red") +
+ labs(x = 'GDP Growth', y = 'Residuals', title = paste("Correlation: ", round(correlation, 2))) +
+ theme_minimal()
+```
+
+Clearly they are very correlated.
+
+#### Are the residuals serially autocorrelated?
+
+```{r}
+# Load necessary libraries
+
+# Create a time series object for residuals
+residuals_ts <- ts(residuals(pooled_ols))
+
+# Create subplots for ACF and PACF
+par(mfrow=c(1,2))
+acf(residuals_ts, main="Autocorrelation", lag.max=20)
+pacf(residuals_ts, main="Partial Autocorrelation", lag.max=20)
+```
+
+Definetely autocorrelation. Lets move on to the fixed effects estimator.
+
+### 3. Fixed Effects
+
+------------------------------------------------------------------------
+
+```{r warning=False, message=False}
+library(plm)
+fe <- plm(GDP.Growth ~ GFCF.change + Inflation.change + Unemployment.change, model='within', data=data)
+summary(fe)
+```
+
+#### Is the fixed effects model better than the pooled ols? Let's run an f-test
+
+```{r}
+pFtest(fe, pooled_ols)
+```
+
+Definetely better than the pooled ols !
+
+### 4. Random Effects
+
+------------------------------------------------------------------------
+
+```{r}
+re <- plm(GDP.Growth ~ GFCF.change + Inflation.change + Unemployment.change, model="random", data=data)
+summary(re)
+```
+#### Should we use fixed or random effects ? (Hausman test)
+
+```{r}
+phtest(fe, re)
+```
+We should definetely use fixed effects instead, as the c_i terms (individual specific intercepts) and regressors are correlated. There is also heterosckedasticity, as seen with the pooled OLS, so the 
+
+
